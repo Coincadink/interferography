@@ -1,5 +1,5 @@
 [package]
-name = "eframe_template"
+name = "interferography"
 version = "0.1.0"
 authors = ["John Peterson <johnp5419@gmail.com>"]
 edition = "2024"

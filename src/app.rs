@@ -10,9 +10,10 @@ enum Pane {
 }
 
 pub struct SimState {
-    pub slit_sep: f32,
-    pub slit_width: f32,
     pub wavelength: f32,
+    pub delta: f32,        // extra path length in arm B
+    pub arm_length: f32,   // nominal arm length
+    pub beam_width: f32,   // Gaussian beam 1-σ width
     pub speed: f32,
     pub paused: bool,
     pub time: f32,
@@ -27,9 +28,10 @@ pub struct SimState {
 impl Default for SimState {
     fn default() -> Self {
         Self {
-            slit_sep: 60.0,
-            slit_width: 12.0,
             wavelength: 20.0,
+            delta: 0.0,
+            arm_length: 120.0,
+            beam_width: 30.0,
             speed: 1.0,
             paused: false,
             time: 0.0,
@@ -43,7 +45,6 @@ impl Default for SimState {
     }
 }
 
-// Implement the Behavior trait to control what renders in each pane
 struct TreeBehavior<'a> {
     sim: &'a mut SimState,
 }
@@ -72,44 +73,106 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
     ) -> egui_tiles::UiResponse {
         match pane {
             Pane::TopLeft => {
-                
                 let sim = &mut self.sim;
-                
-                ui.heading("Fourier optics");
+
+                ui.heading("Interferometer");
                 ui.add_space(8.0);
 
                 let mut changed = false;
-
-                ui.label("slit separation");
-                let r = ui.add(egui::Slider::new(&mut sim.slit_sep, 10.0..=200.0).suffix(" px"));
-                changed |= r.drag_stopped() || r.lost_focus();
-
-                ui.label("slit width");
-                let r = ui.add(egui::Slider::new(&mut sim.slit_width, 2.0..=40.0).suffix(" px"));
-                changed |= r.drag_stopped() || r.lost_focus();
 
                 ui.label("wavelength (λ)");
                 let r = ui.add(egui::Slider::new(&mut sim.wavelength, 5.0..=50.0).suffix(" px"));
                 changed |= r.drag_stopped() || r.lost_focus();
 
+                ui.add_space(4.0);
+                ui.label("path length difference (ΔL)");
+                ui.small("Arm B extra length — controls interference");
+                // Range ±3λ expressed in sim units
+                let r = ui.add(
+                    egui::Slider::new(&mut sim.delta, -80.0..=80.0)
+                        .suffix(" px")
+                        .smart_aim(false),
+                );
+                changed |= r.drag_stopped() || r.lost_focus();
+
+                // Helper: show how many λ the delta corresponds to
+                let frac = sim.delta / sim.wavelength;
+                ui.small(format!("= {:.2} λ", frac));
+
+                ui.add_space(4.0);
+                ui.label("arm length");
+                let r = ui.add(egui::Slider::new(&mut sim.arm_length, 40.0..=300.0).suffix(" px"));
+                changed |= r.drag_stopped() || r.lost_focus();
+
+                ui.add_space(4.0);
+                ui.label("beam width (σ)");
+                let r = ui.add(egui::Slider::new(&mut sim.beam_width, 5.0..=80.0).suffix(" px"));
+                changed |= r.drag_stopped() || r.lost_focus();
+
+                ui.add_space(8.0);
                 ui.label("animation speed");
                 ui.add(egui::Slider::new(&mut sim.speed, 0.1..=5.0));
+
+                ui.add_space(4.0);
+                if ui.checkbox(&mut sim.paused, "pause").changed() {}
 
                 if changed {
                     sim.dirty = true;
                     sim.cache = None;
                 }
+
+                // Quick-set buttons for common path differences
+                ui.add_space(8.0);
+                ui.label("Preset ΔL:");
+                ui.horizontal(|ui| {
+                    if ui.small_button("0 (bright)").clicked() {
+                        sim.delta = 0.0;
+                        sim.dirty = true;
+                        sim.cache = None;
+                    }
+                    if ui.small_button("λ/2 (dark)").clicked() {
+                        sim.delta = sim.wavelength / 2.0;
+                        sim.dirty = true;
+                        sim.cache = None;
+                    }
+                    if ui.small_button("λ (bright)").clicked() {
+                        sim.delta = sim.wavelength;
+                        sim.dirty = true;
+                        sim.cache = None;
+                    }
+                });
             }
 
             Pane::BottomLeft => {
                 ui.heading("About");
                 ui.add_space(4.0);
-                ui.label("Fresnel propagation of a double slit.");
-                ui.label("Vertical axis = z (propagation depth).");
-                ui.label("Horizontal axis = x (transverse position).");
+                ui.label("Mach-Zehnder interferometer simulation.");
+                ui.add_space(6.0);
+
+                // Colour-coded legend using coloured rectangles
+                let row_h = 14.0;
+
+                let mut paint_legend = |color: egui::Color32, text: &str| {
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(12.0, row_h),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 2.0, color);
+                        ui.label(text);
+                    });
+                };
+
+                paint_legend(egui::Color32::from_rgb(60, 80, 180), "Input beam (cyan)");
+                paint_legend(egui::Color32::from_rgb(200, 140, 20),  "Arm A — transmitted");
+                paint_legend(egui::Color32::from_rgb(20, 160, 190),  "Arm B — reflected (+ ΔL)");
+                paint_legend(egui::Color32::from_rgb(180, 40, 180),  "Recombination");
+                paint_legend(egui::Color32::from_rgb(60, 140, 230),  "Output / fringes");
+
                 ui.add_space(8.0);
-                ui.label("Near field (top): Huygens wavelets still separate.");
-                ui.label("Far field (bottom): classic sinc² pattern.");
+                ui.label("ΔL = 0  → constructive (bright)");
+                ui.label("ΔL = λ/2 → destructive (dark)");
+                ui.label("ΔL = nλ  → constructive again");
             }
 
             Pane::Right => {
@@ -131,11 +194,12 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
                     let w = (rect.width() as usize).max(64).min(512);
                     #[cfg(not(target_arch = "wasm32"))]
                     let h = (rect.height() as usize).max(64).min(512);
-                    
+
                     let p = SimParams {
-                        slit_sep: sim.slit_sep,
-                        slit_width: sim.slit_width,
                         wavelength: sim.wavelength,
+                        delta: sim.delta,
+                        arm_length: sim.arm_length,
+                        beam_width: sim.beam_width,
                         width: w,
                         height: h,
                     };
@@ -151,7 +215,6 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
 
                     #[cfg(target_arch = "wasm32")]
                     {
-                        // No threads on WASM — compute synchronously
                         let cache = Arc::new(FieldCache::compute(&p));
                         sim.cache = Some(cache);
                         sim.computing = false;
@@ -230,7 +293,6 @@ pub struct TemplateApp {
     sim: SimState,
 }
 
-
 impl Default for TemplateApp {
     fn default() -> Self {
         let mut tiles = egui_tiles::Tiles::default();
@@ -245,7 +307,9 @@ impl Default for TemplateApp {
         let right_tab = tiles.insert_tab_tile(vec![right]);
         let root = tiles.insert_horizontal_tile(vec![left_split, right_tab]);
 
-        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) = tiles.get_mut(root) {
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            tiles.get_mut(root)
+        {
             linear.shares.set_share(left_split, 25.0);
             linear.shares.set_share(right_tab, 75.0);
         }
