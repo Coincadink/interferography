@@ -1,52 +1,22 @@
-use std::sync::{Arc, Mutex};
-use crate::simulation::{FieldCache, SimParams};
+// app.rs — two-pane sine-wave viewer using egui_tiles
 
-// Define the panes
+use crate::simulation::WaveParams;
+
+// ---------------------------------------------------------------------------
+// Panes
+// ---------------------------------------------------------------------------
 #[derive(serde::Deserialize, serde::Serialize)]
 enum Pane {
-    TopLeft,
-    BottomLeft,
-    Right,
+    Controls,
+    Wave,
 }
 
-pub struct SimState {
-    pub wavelength: f32,
-    pub delta: f32,        // extra path length in arm B
-    pub arm_length: f32,   // nominal arm length
-    pub beam_width: f32,   // Gaussian beam 1-σ width
-    pub speed: f32,
-    pub paused: bool,
-    pub time: f32,
-    pub cache: Option<Arc<FieldCache>>,
-    pub dirty: bool,
-    pub computing: bool,
-    pub pending: Arc<Mutex<Option<Arc<FieldCache>>>>,
-    pub texture: Option<egui::TextureHandle>,
-    pub pixel_buf: Vec<egui::Color32>,
-}
-
-impl Default for SimState {
-    fn default() -> Self {
-        Self {
-            wavelength: 20.0,
-            delta: 0.0,
-            arm_length: 120.0,
-            beam_width: 30.0,
-            speed: 1.0,
-            paused: false,
-            time: 0.0,
-            cache: None,
-            dirty: true,
-            computing: false,
-            pending: Arc::new(Mutex::new(None)),
-            texture: None,
-            pixel_buf: Vec::new(),
-        }
-    }
-}
-
+// ---------------------------------------------------------------------------
+// TreeBehavior
+// ---------------------------------------------------------------------------
 struct TreeBehavior<'a> {
-    sim: &'a mut SimState,
+    params: &'a mut WaveParams,
+    time:   f32,
 }
 
 impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
@@ -59,9 +29,8 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
 
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
         match pane {
-            Pane::TopLeft => "Controls".into(),
-            Pane::BottomLeft => "Info".into(),
-            Pane::Right => "Simulation".into(),
+            Pane::Controls => "Controls".into(),
+            Pane::Wave     => "Wave".into(),
         }
     }
 
@@ -72,260 +41,145 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
         pane: &mut Pane,
     ) -> egui_tiles::UiResponse {
         match pane {
-            Pane::TopLeft => {
-                let sim = &mut self.sim;
-
-                ui.heading("Interferometer");
+            // ── LEFT: sliders ───────────────────────────────────────────────
+            Pane::Controls => {
                 ui.add_space(8.0);
+                ui.heading("Controls");
+                ui.add_space(10.0);
 
-                let mut changed = false;
+                ui.label("Amplitude");
+                ui.add(egui::Slider::new(&mut self.params.amplitude, 0.05..=1.0).step_by(0.01));
 
-                ui.label("wavelength (λ)");
-                let r = ui.add(egui::Slider::new(&mut sim.wavelength, 5.0..=50.0).suffix(" px"));
-                changed |= r.drag_stopped() || r.lost_focus();
-
-                ui.add_space(4.0);
-                ui.label("path length difference (ΔL)");
-                ui.small("Arm B extra length — controls interference");
-                // Range ±3λ expressed in sim units
-                let r = ui.add(
-                    egui::Slider::new(&mut sim.delta, -80.0..=80.0)
-                        .suffix(" px")
-                        .smart_aim(false),
-                );
-                changed |= r.drag_stopped() || r.lost_focus();
-
-                // Helper: show how many λ the delta corresponds to
-                let frac = sim.delta / sim.wavelength;
-                ui.small(format!("= {:.2} λ", frac));
-
-                ui.add_space(4.0);
-                ui.label("arm length");
-                let r = ui.add(egui::Slider::new(&mut sim.arm_length, 40.0..=300.0).suffix(" px"));
-                changed |= r.drag_stopped() || r.lost_focus();
-
-                ui.add_space(4.0);
-                ui.label("beam width (σ)");
-                let r = ui.add(egui::Slider::new(&mut sim.beam_width, 5.0..=80.0).suffix(" px"));
-                changed |= r.drag_stopped() || r.lost_focus();
-
-                ui.add_space(8.0);
-                ui.label("animation speed");
-                ui.add(egui::Slider::new(&mut sim.speed, 0.1..=5.0));
-
-                ui.add_space(4.0);
-                if ui.checkbox(&mut sim.paused, "pause").changed() {}
-
-                if changed {
-                    sim.dirty = true;
-                    sim.cache = None;
-                }
-
-                // Quick-set buttons for common path differences
-                ui.add_space(8.0);
-                ui.label("Preset ΔL:");
-                ui.horizontal(|ui| {
-                    if ui.small_button("0 (bright)").clicked() {
-                        sim.delta = 0.0;
-                        sim.dirty = true;
-                        sim.cache = None;
-                    }
-                    if ui.small_button("λ/2 (dark)").clicked() {
-                        sim.delta = sim.wavelength / 2.0;
-                        sim.dirty = true;
-                        sim.cache = None;
-                    }
-                    if ui.small_button("λ (bright)").clicked() {
-                        sim.delta = sim.wavelength;
-                        sim.dirty = true;
-                        sim.cache = None;
-                    }
-                });
-            }
-
-            Pane::BottomLeft => {
-                ui.heading("About");
-                ui.add_space(4.0);
-                ui.label("Mach-Zehnder interferometer simulation.");
                 ui.add_space(6.0);
+                ui.label("Frequency (cycles)");
+                ui.add(egui::Slider::new(&mut self.params.frequency, 0.5..=10.0).step_by(0.1));
 
-                // Colour-coded legend using coloured rectangles
-                let row_h = 14.0;
+                ui.add_space(6.0);
+                ui.label("Phase (rad)");
+                ui.add(
+                    egui::Slider::new(&mut self.params.phase, 0.0..=std::f32::consts::TAU)
+                        .step_by(0.01)
+                        .suffix(" rad"),
+                );
 
-                let mut paint_legend = |color: egui::Color32, text: &str| {
-                    ui.horizontal(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(12.0, row_h),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter().rect_filled(rect, 2.0, color);
-                        ui.label(text);
-                    });
-                };
+                ui.add_space(6.0);
+                ui.label("Animation speed");
+                ui.add(egui::Slider::new(&mut self.params.speed, 0.0..=5.0).step_by(0.1));
 
-                paint_legend(egui::Color32::from_rgb(60, 80, 180), "Input beam (cyan)");
-                paint_legend(egui::Color32::from_rgb(200, 140, 20),  "Arm A — transmitted");
-                paint_legend(egui::Color32::from_rgb(20, 160, 190),  "Arm B — reflected (+ ΔL)");
-                paint_legend(egui::Color32::from_rgb(180, 40, 180),  "Recombination");
-                paint_legend(egui::Color32::from_rgb(60, 140, 230),  "Output / fringes");
-
-                ui.add_space(8.0);
-                ui.label("ΔL = 0  → constructive (bright)");
-                ui.label("ΔL = λ/2 → destructive (dark)");
-                ui.label("ΔL = nλ  → constructive again");
+                ui.add_space(12.0);
+                if ui.button("Reset").clicked() {
+                    *self.params = WaveParams::default();
+                }
             }
 
-            Pane::Right => {
+            // ── RIGHT: sine wave ────────────────────────────────────────────
+            Pane::Wave => {
                 ui.ctx().request_repaint();
-                let sim = &mut self.sim;
 
-                // Kick off background recompute if needed
-                if sim.dirty && !sim.computing {
-                    sim.dirty = false;
-                    sim.computing = true;
-                    let rect = ui.available_rect_before_wrap();
+                let draw_rect = ui.available_rect_before_wrap();
+                let painter   = ui.painter_at(draw_rect);
 
-                    #[cfg(target_arch = "wasm32")]
-                    let w = (rect.width() as usize).max(32).min(128);
-                    #[cfg(target_arch = "wasm32")]
-                    let h = (rect.height() as usize).max(32).min(128);
+                // Background
+                painter.rect_filled(draw_rect, 0.0, ui.visuals().extreme_bg_color);
 
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let w = (rect.width() as usize).max(64).min(512);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let h = (rect.height() as usize).max(64).min(512);
+                let w  = draw_rect.width();
+                let h  = draw_rect.height();
+                let cx = draw_rect.left();
+                let cy = draw_rect.center().y;
 
-                    let p = SimParams {
-                        wavelength: sim.wavelength,
-                        delta: sim.delta,
-                        arm_length: sim.arm_length,
-                        beam_width: sim.beam_width,
-                        width: w,
-                        height: h,
-                    };
+                // Axes
+                let axis_color = ui.visuals().widgets.noninteractive.fg_stroke.color
+                    .linear_multiply(0.35);
+                painter.line_segment(
+                    [egui::pos2(cx, cy), egui::pos2(cx + w, cy)],
+                    egui::Stroke::new(1.0, axis_color),
+                );
+                painter.line_segment(
+                    [egui::pos2(cx, draw_rect.top()), egui::pos2(cx, draw_rect.bottom())],
+                    egui::Stroke::new(1.0, axis_color),
+                );
 
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        let mailbox = Arc::clone(&sim.pending);
-                        std::thread::spawn(move || {
-                            let cache = Arc::new(FieldCache::compute(&p));
-                            *mailbox.lock().unwrap() = Some(cache);
-                        });
-                    }
+                // Sine curve
+                let n = (w as usize).max(2);
+                let points: Vec<egui::Pos2> = (0..=n)
+                    .map(|i| {
+                        let t = i as f32 / n as f32;
+                        let x = cx + t * w;
+                        let y = cy
+                            - self.params.amplitude
+                            * (h * 0.45)
+                            * (std::f32::consts::TAU
+                                * self.params.frequency * t
+                                + self.params.phase
+                                + self.time)
+                                .sin();
+                        egui::pos2(x, y)
+                    })
+                    .collect();
 
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        let cache = Arc::new(FieldCache::compute(&p));
-                        sim.cache = Some(cache);
-                        sim.computing = false;
-                    }
-                }
+                painter.add(egui::Shape::line(
+                    points,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                ));
 
-                // Collect finished result (native only)
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Ok(mut guard) = sim.pending.try_lock() {
-                    if let Some(new_cache) = guard.take() {
-                        sim.cache = Some(new_cache);
-                        sim.computing = false;
-                    }
-                }
-
-                // Advance time
-                if !sim.paused {
-                    sim.time += ui.input(|i| i.stable_dt) * sim.speed * 2.0;
-                }
-
-                let rect = ui.available_rect_before_wrap();
-
-                if let Some(cache) = sim.cache.clone() {
-                    let w = cache.params.width;
-                    let h = cache.params.height;
-                    cache.render(&mut sim.pixel_buf, sim.time);
-
-                    let img = egui::ColorImage {
-                        size: [w, h],
-                        pixels: sim.pixel_buf.clone(),
-                        source_size: egui::vec2(w as f32, h as f32),
-                    };
-
-                    match &mut sim.texture {
-                        Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
-                        None => {
-                            sim.texture = Some(ui.ctx().load_texture(
-                                "sim_field",
-                                img,
-                                egui::TextureOptions::LINEAR,
-                            ));
-                        }
-                    }
-
-                    if let Some(tex) = &sim.texture {
-                        let uv = egui::Rect::from_min_max(
-                            egui::pos2(0.0, 0.0),
-                            egui::pos2(1.0, 1.0),
-                        );
-                        ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
-                    }
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(if sim.computing {
-                            "computing field…"
-                        } else {
-                            "initialising…"
-                        });
-                    });
-                }
+                // Legend
+                let p = &self.params;
+                painter.text(
+                    egui::pos2(draw_rect.left() + 8.0, draw_rect.top() + 8.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("A={:.2}  f={:.1}  φ={:.2}", p.amplitude, p.frequency, p.phase),
+                    egui::FontId::proportional(11.0),
+                    ui.visuals().weak_text_color(),
+                );
             }
         }
+
         egui_tiles::UiResponse::None
     }
 }
 
-
+// ---------------------------------------------------------------------------
+// Simulation
+// ---------------------------------------------------------------------------
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
-pub struct TemplateApp {
-    label: String,
-    #[serde(skip)]
-    value: f32,
+pub struct Simulation {
     tree: egui_tiles::Tree<Pane>,
     #[serde(skip)]
-    sim: SimState,
+    params: WaveParams,
+    #[serde(skip)]
+    time: f32,
 }
 
-impl Default for TemplateApp {
+impl Default for Simulation {
     fn default() -> Self {
         let mut tiles = egui_tiles::Tiles::default();
 
-        let top_left = tiles.insert_pane(Pane::TopLeft);
-        let bottom_left = tiles.insert_pane(Pane::BottomLeft);
-        let right = tiles.insert_pane(Pane::Right);
+        let controls = tiles.insert_pane(Pane::Controls);
+        let wave     = tiles.insert_pane(Pane::Wave);
 
-        let left_tab_top = tiles.insert_tab_tile(vec![top_left]);
-        let left_tab_bottom = tiles.insert_tab_tile(vec![bottom_left]);
-        let left_split = tiles.insert_vertical_tile(vec![left_tab_top, left_tab_bottom]);
-        let right_tab = tiles.insert_tab_tile(vec![right]);
-        let root = tiles.insert_horizontal_tile(vec![left_split, right_tab]);
+        let left  = tiles.insert_tab_tile(vec![controls]);
+        let right = tiles.insert_tab_tile(vec![wave]);
 
-        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+        let root = tiles.insert_horizontal_tile(vec![left, right]);
+
+        // 28 % left / 72 % right
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(lin))) =
             tiles.get_mut(root)
         {
-            linear.shares.set_share(left_split, 25.0);
-            linear.shares.set_share(right_tab, 75.0);
+            lin.shares.set_share(left,  28.0);
+            lin.shares.set_share(right, 72.0);
         }
 
-        let tree = egui_tiles::Tree::new("main_tree", root, tiles);
-
         Self {
-            label: "Hello World!".to_owned(),
-            value: 2.7,
-            tree,
-            sim: SimState::default(),
+            tree:   egui_tiles::Tree::new("main_tree", root, tiles),
+            params: WaveParams::default(),
+            time:   0.0,
         }
     }
 }
 
-impl TemplateApp {
+impl Simulation {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         if let Some(storage) = cc.storage {
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
@@ -335,12 +189,16 @@ impl TemplateApp {
     }
 }
 
-impl eframe::App for TemplateApp {
+impl eframe::App for Simulation {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
+        self.time += dt * self.params.speed;
+
+        // Theme toggle in top-right corner
         let content_rect = ui.ctx().content_rect();
         egui::Area::new(egui::Id::new("theme_toggle"))
             .fixed_pos(egui::pos2(content_rect.right() - 36.0, 7.0))
@@ -357,7 +215,10 @@ impl eframe::App for TemplateApp {
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            let mut behavior = TreeBehavior { sim: &mut self.sim };
+            let mut behavior = TreeBehavior {
+                params: &mut self.params,
+                time:   self.time,
+            };
             self.tree.ui(&mut behavior, ui);
         });
     }
